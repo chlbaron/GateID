@@ -1,22 +1,22 @@
-setwd("your_path")
+setwd("~/Desktop/PhD_Chloe_AvO/GateKeeper/Shareable_code")
+source('Functions_GateID.R', echo=TRUE)
 
-##source functions for Gate design
-source('Functions_gate_design.R', echo=TRUE)
+
+#_________PART 1: Gate design_________#
 
 ##load gateID training dataset (rows= single cells & columns=ClusterID followed by index data in all available channels)
-data <- as.data.frame(read.table("gateID_training_dataset_test.csv", header = T, sep = "\t", stringsAsFactors = F))
+data <- as.data.frame(read.table("GateID_training_dataset.csv", header = T, sep = "\t", stringsAsFactors = F))
+datastart <- 2  #index data start at column 2 since colunm 1 is ClusterID
 
 ##define the desired cell type 
-desired.cluster <- c(1)
-
-##define parameter for gate design
-datastart <- 2  ##index data start at column 2 since colunm 1 is ClusterID
+desired.cluster <- 1
 tgc <-t(combn(seq(datastart,dim(data)[2]), m = 2)) 
-combs <- t(combn(seq(datastart,dim(data)[2], 1), m=2)) 
 bool.desired <- data$ClusterID %in% desired.cluster
+
+##define parameters for gate design
 seed <- 23
-thresh <- 0.3
-nverts <- 4  ##define number of vertices for gates
+thresh <- 0.3 #yield threshold
+nverts <- 4 #define number of vertices for gates
 
 ##create dataframe for GateID results
 gate_sol <- data.frame(matrix(0, ncol = 20 , nrow = nrow(tgc)))
@@ -26,7 +26,7 @@ gate_sol <- data.frame(matrix(0, ncol = 20 , nrow = nrow(tgc)))
 ##gate_sol contains solutions
 for(j in c(1:nrow(tgc))){
   gc <- tgc[j,]
-  gs <- as.vector(t(combs[gc, ]))
+  gs <- as.vector(t(tgc[gc, ]))
   dimensions <- gs
   dataset <- data
   numgates <- length(gs)/2
@@ -67,24 +67,75 @@ for(j in c(1:nrow(tgc))){
 gate_sol <- gate_sol[rev(order(gate_sol$X4, gate_sol$X3)), ]
 
 ##picks the vertex coordinates (16 values) for the best gate combination
-##change the rowgate parameter to visualize different gates solutions
-rowgate <- 1
+rowgate <- 1 #change the rowgate parameter to visualize different gates solutions
 bestgate <- as.numeric(gate_sol[rowgate, c(5:ncol(gate_sol))]) 
-
-###this tells you the start of the coordinates of each gate
 numgates <- 2
 ji <- seq(1,length(bestgate),length(bestgate)/numgates)
-
-###gate.ori = list of both gate coordinates
 nd <- length(bestgate)/numgates
 gate.ori <- list()
 gate.ori <- lapply(ji, function(y) as.matrix(orderCW(bestgate[y:(y+(nd-1))],4)))
-gate.ori <- lapply(gate.ori, function(y) as.matrix(rbind(y, y[1, ])))
-
-####dims = channels in which the gates are designed (refers to the columns of the training which contain clusterID)
+gate.ori <- lapply(gate.ori, function(y) as.matrix(rbind(y, y[1, ]))) #contains predicted gate coordinates
 h.index <- as.numeric(gate_sol[rowgate, c(1,2)])
 channel.comb <- t(combn(seq(datastart,dim(data)[2]), m = 2))
-dims <- channel.comb[h.index, ]
+dims <- channel.comb[h.index, ] #channels in which the gates are designed (refers to the columns of the training which contain clusterID)
+cal.gate.efficacy(trainingdata = data, bool.desired = bool.desired, gates = gate.ori, dims = dims, plot = T, verbose = T) #plot gate and print gate stats
 
-# Plot gate and its parameters
-cal.gate.efficacy(trainingdata = data, bool.desired = bool.desired, gates = gate.ori, dims = dims, plot = T, verbose = T)
+
+#_________PART 2: Train a machine learning model to perform desired cell type prediction_________#
+
+##create train and test dataset from data
+type.clusters.desired <- {list(
+  c("Desired",desired.cluster),
+  c("Other",unique(data[!data[,1] %in% desired.cluster,1]))
+)}
+oricl.desired <- rename.clusters(data = data, type.clusters = type.clusters.desired,name = T)
+
+train <- (createDataPartition(oricl.desired, p = 0.8))$Resample1
+traindata <- data[train, ]
+trainclass <- oricl.desired[train]
+
+testdata <- data[-train,]
+testclass <- oricl.desired[-train]
+
+set.seed(seed)
+
+##train the random forrest model
+control <- trainControl(method = "repeatedcv", number = 10, repeats = 10, sampling = "smote", classProbs = TRUE, summaryFunction = multiClassSummary)
+final.model <- train(x = traindata[,-1], y = trainclass, method="rf", tuneLength = 5, trControl=control, preProcess = c("center","scale"), metric = "Kappa")
+predrf <- predict(final.model, testdata[,-1]) #evaluate model on test data
+p <- table(model = predrf, truth = testclass)[1,]
+p[1]/(sum(as.matrix(p))) #print model prediction accuracy
+
+
+#_________PART 4: Load FACS data associated with training dataset_________#
+
+odata.fcs <- read.table("FACS_data_training_dataset.csv", header = T, sep = "\t", stringsAsFactors = F)
+##for your own training dataset, this data will have to be extracted from the fcs file using the extract.presort functions as below
+
+
+#_________PART 5: Load current FACS data (of new experimental dataset) and perform normalization_________#
+
+xmlfile <- "FACS_configuration_experimental_dataset.xml" #xml of new experimental dataset
+fcsfile <- "FACS_data_experimental_dataset.fcs" #fcs file of new experimental dataset (record 10000 events)
+presort <- extract.presort(fcsfile = fcsfile, xmlfile = xmlfile, pregates = c("P1", "P2", "P3", "P4")) #extract non-normalized FACS parameters of new experimental dataset (pregates are gate names used to gate live cells)
+presort <- presort[,c(2,3,20,5)] #selecting only FACS dimensions for the test dataset - keep all FACS parameters for real experiment
+colnames(presort) <- colnames(odata.fcs) #unify colnames for all dataframes (data/odata.fcs/presort)
+
+presort.q <- presort #create presort.q that will be the normalized new experimental dataset
+for (i in 1:ncol(odata.fcs)) {
+  presort.q[,i] = normalize.qspline(x = as.matrix(presort.q[,i]), target = as.matrix(odata.fcs[,i]), verbose = F, min.offset = 0.01)
+}
+l = unique(unlist(apply(presort.q, 2, function(x) which(x<0))))
+if (length(l) > 0) {
+  presort <- presort[which(!1:nrow(presort.q) %in% l),]
+  presort.q <- presort.q[which(!1:nrow(presort.q) %in% l),]
+}
+pred <- predict(final.model, presort.q) #perform the normalization
+gate.norm <- norm.class(trainingdata = data[,-1], newdata = presort, bool.desired = oricl.desired == "Desired" , bool.ml = pred == "Desired", gates = gate.ori, dims = dims-1) #normalize the gates
+print(gate.norm)
+
+
+#_________PART 6: Plot gates_________#
+
+##plot new facs data before and after normalization
+plot.norm.gate(prenorm = presort, postnorm = presort.q, pregates = gate.ori, postgates = gate.norm, dims = dims)
