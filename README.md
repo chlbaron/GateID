@@ -5,7 +5,7 @@ File description:
 
 *Functions_gate_design.R: functions to source to run the code.
 
-*Code_gate_design.R contains the code to perform GateID gate design. 
+*Code_gate_design.R contains the code to perform GateID gate design and normalization. 
 
 To test the code, you can download the following test dataset: "gateID_training_dataset_test.csv" 
 The code designs gates for cluster 1.
